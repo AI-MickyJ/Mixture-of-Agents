@@ -153,4 +153,4 @@ The current implementation provides a basic structure for the MoA model. You can
 Wang, J., Wang, J., Athiwaratkun, B., Zhang, C., & Zou, J. (2024). Mixture-of-Agents Enhances Large Language Model Capabilities. arXiv preprint arXiv:2406.04692v1.
 
 ## License
-[Include your chosen license here]
+See the LICENSE file for details.
