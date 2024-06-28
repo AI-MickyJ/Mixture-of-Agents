@@ -1,0 +1,5 @@
+openai==1.14.0
+anthropic==0.18.1
+google-generativeai==0.3.2
+python-dotenv==1.0.1
+termcolor==2.4.0
