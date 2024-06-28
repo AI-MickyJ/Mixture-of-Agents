@@ -1,5 +1,7 @@
 # Mixture of Agents (MoA) Implementation
 
+![Image](https://github.com/AI-MickyJ/Mixture-of-Agents/assets/171421294/7064d5ea-e3dc-4baa-b399-aa30fd433f2d)
+
 ## Introduction
 This project implements a Mixture of Agents (MoA) model, a novel approach to leveraging multiple Large Language Models (LLMs) to enhance reasoning and language generation capabilities. The implementation is based on the paper "Mixture-of-Agents Enhances Large Language Model Capabilities" by Wang et al. (2024).
 
