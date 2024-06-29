@@ -56,8 +56,8 @@ This architecture allows for:
 
 1. The user input is fed into the first layer.
 2. In each layer:
- - ALl agents process the input simultaneuously.
- - Responses from all agents are aggregated using Claude as a synthesizer.
+   - ALl agents process the input simultaneuously.
+   - Responses from all agents are aggregated using Claude as a synthesizer.
 3. The aggregated output becomes the input for the next layer.
 4. This process repeates through all layers.
 5. A final rewrite step ensures the response is coherent and directly addresses the user's prompt.
@@ -67,9 +67,9 @@ This architecture allows for:
 **Color-Coded CLI Output**
 The CLI displays color-coded outputs for each agent in each layer:
 
-Red: GPT-4
-Green: Claude
-Yellow: Gemini
+- Red: GPT-4
+- Green: Claude
+- Yellow: Gemini
 
 This feature allows for easy visual distinction between different agents' responses.
 
