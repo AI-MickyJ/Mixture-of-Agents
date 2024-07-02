@@ -3,7 +3,7 @@
 ![Image](https://github.com/AI-MickyJ/Mixture-of-Agents/assets/171421294/7064d5ea-e3dc-4baa-b399-aa30fd433f2d)
 
 ## Introduction
-This project implements a Mixture of Agents (MoA) model, a novel approach to leveraging multiple Large Language Models (LLMs) to enhance reasoning and language generation capabilities. The implementation is based on the paper "Mixture-of-Agents Enhances Large Language Model Capabilities" by Wang et al. (2024).
+This project implements a Mixture of Agents (MoA) model, a novel approach to leveraging multiple Large Language Models (LLMs) to enhance reasoning and language generation capabilities. The implementation is based on the paper "Mixture-of-Agents Enhances Large Language Model Capabilities" by Wang et al. (2024). It differs in that it implements MoA with Gemini Pro 1.5, GPT4-o & Claude Sonnet 3.5 rather than open source models.
 
 ## How It Works
 
@@ -13,9 +13,8 @@ Our MoA implementation utilizes a multi-layer architecture with multiple LLM age
     - GPT-4 (OpenAI)
     - Claude 3.5 Sonnet (Anthropic)
     - Gemini Pro 1.5 (Google)
-- Multiple processing layers (configurable, default is 3)
-
-With the aim to achieve a best-in-clasee performance level through use of leading edge models
+- Multiple processing layers (configurable, default is 2, maximum recommended is 3)
+- Specialized roles for synthesis and final output generation
 
 ## Architecture Diagram
 
@@ -25,70 +24,63 @@ graph TD
     B --> C[GPT-4 Agent]
     B --> D[Claude Agent]
     B --> E[Gemini Agent]
-    C --> F[Aggregate Responses]
+    C --> F[Aggregation & Peer Review]
     D --> F
     E --> F
-    F --> G[Layer 2]
-    G --> H[GPT-4 Agent]
-    G --> I[Claude Agent]
-    G --> J[Gemini Agent]
-    H --> K[Aggregate Responses]
-    I --> K
-    J --> K
-    K --> L[Layer 3]
-    L --> M[GPT-4 Agent]
-    L --> N[Claude Agent]
-    L --> O[Gemini Agent]
-    M --> P[Aggregate Responses]
-    N --> P
-    O --> P
-    P --> Q[Final Rewrite]
-    Q --> R[Final Output]
+    F --> G[Gemini Synthesis]
+    G --> H[Layer 2]
+    H --> I[GPT-4 Agent]
+    H --> J[Claude Agent]
+    H --> K[Gemini Agent]
+    I --> L[Aggregation & Peer Review]
+    J --> L
+    K --> L
+    L --> M[Gemini Synthesis]
+    M --> N[Claude Final Output]
+    N --> O[Final Response]
 ```
-
-This architecture allows for:
-
-- Iterative refinement of responses through multiple layers
-- Leveraging strenths of different LLMs
-- Sophisticated aggregation of diverse model outputs
 
 ## Process Flow:
 
 1. The user input is fed into the first layer.
 2. In each layer:
-   - ALl agents process the input simultaneuously.
-   - Responses from all agents are aggregated using Claude as a synthesizer.
-3. The aggregated output becomes the input for the next layer.
-4. This process repeates through all layers.
-5. A final rewrite step ensures the response is coherent and directly addresses the user's prompt.
+   - All agents process the input simultaneously.
+   - Each agent then reviews and aggregates all responses, including their own, with enhanced critical analysis.
+   - Gemini synthesizes the aggregated responses and provides a devil's advocate perspective.
+3. The synthesized output becomes the input for the next layer.
+4. This process repeats through all layers.
+5. Claude generates the final output based on all layer syntheses, performing a thorough cross-check against the original prompt.
+
+## New Features
+
+1. **Enhanced Aggregation**: Each agent now performs a more rigorous analysis, including assumption challenging, mathematical verification, and peer review.
+2. **Devil's Advocate**: The synthesis step now includes an aggressive devil's advocate perspective to challenge prevailing answers.
+3. **Logic Tree Exploration**: Agents are instructed to explore multiple interpretations using logic trees.
+4. **Final Cross-Check**: The final output generation includes a thorough cross-check against the original prompt.
+5. **Detailed Markdown Logging**: The system now generates comprehensive markdown logs of the entire process.
+
+## Key Differences from the Original Paper
+
+1. **Specialized Roles**: We use Gemini specifically for synthesis and Claude for final output, leveraging their unique strengths.
+2. **Enhanced Critical Analysis**: Our implementation includes more rigorous peer review and assumption challenging at each stage.
+3. **Devil's Advocate Perspective**: We've added a dedicated step to critically challenge the prevailing answers.
+4. **Flexible Layer Configuration**: Users can choose the number of layers, with recommendations for optimal performance.
+5. **Comprehensive Logging**: Our system provides detailed, structured logs of the entire reasoning process.
 
 ## Features
 
 **Color-Coded CLI Output**
-The CLI displays color-coded outputs for each agent in each layer:
-
-- Red: GPT-4
-- Green: Claude
-- Yellow: Gemini
-
-This feature allows for easy visual distinction between different agents' responses.
+The CLI displays color-coded outputs for each stage of the process, enhancing readability and understanding of the workflow.
 
 **Full Text Display**
-The CLI now shows the full text of each agent's response at each layer, providing a comprehensive view of the reasoning process.
+The CLI shows the full text of each agent's response at each layer, providing a comprehensive view of the reasoning process.
 
-**HTML Report Generation**
-After each interaction, an HTML report (moa_report.html) is generated, containing:
-
+**Markdown Report Generation**
+After each interaction, a detailed Markdown report is generated, containing:
 - The original prompt
 - Full responses from each agent at each layer
-- The final synthesized response
-
-The HTML report uses color-coding for easy readability:
-
-- Light red background: GPT-4 responses
-- Light green background: Claude responses
-- Light blue background: Gemini responses
-- Light cyan background: Final synthesized response
+- Synthesis and devil's advocate perspectives
+- The final response
 
 This report is useful for in-depth analysis of the MoA process and for sharing results.
 

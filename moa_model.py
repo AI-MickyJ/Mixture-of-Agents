@@ -4,13 +4,18 @@ from typing import List, Dict
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 import google.generativeai as genai
+from google.generativeai.types import GenerationConfig
 from dotenv import load_dotenv
 from termcolor import colored
+from pathlib import Path
 import html
 import re
 from difflib import SequenceMatcher
+import logging
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
 
 class Agent:
     def __init__(self, name: str, model: str, role: str):
@@ -20,18 +25,19 @@ class Agent:
 
     async def generate(self, prompt: str) -> str:
         raise NotImplementedError
-
+    
 class GPT4Agent(Agent):
     def __init__(self):
         super().__init__("GPT-4", "gpt-4o", "Agent 1")
         self.client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    async def generate(self, prompt: str) -> str:
+    async def generate(self, prompt: str, max_tokens: int = 1000) -> str:
         response = await self.client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=1000        )
-        return response.choices[0].message.content
+            max_tokens=max_tokens
+        )
+        return response.choices[0].message.content if response.choices else ""
 
 class ClaudeAgent(Agent):
     def __init__(self):
@@ -46,7 +52,7 @@ class ClaudeAgent(Agent):
                 {"role": "user", "content": prompt}
             ]
         )
-        return response.content[0].text
+        return response.content[0].text if response.content else ""
 
 class GeminiAgent(Agent):
     def __init__(self):
@@ -54,244 +60,294 @@ class GeminiAgent(Agent):
         genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
         self.model = genai.GenerativeModel('gemini-1.5-pro')
 
-    async def generate(self, prompt: str) -> str:
-        response = await asyncio.to_thread(self.model.generate_content, prompt)
-        return response.text
+    async def generate(self, prompt: str, max_tokens: int = 1000) -> str:
+        generation_config = GenerationConfig(
+            max_output_tokens=max_tokens,
+            temperature=0.7,
+            top_p=1,
+            top_k=1
+        )
+        try:
+            response = await asyncio.to_thread(
+                self.model.generate_content,
+                prompt,
+                generation_config=generation_config
+            )
+            return response.text if response.text else ""
+        except Exception as e:
+            print(f"Error in GeminiAgent: {str(e)}")
+            return f"Error occurred: {str(e)}"
 
 class MixtureOfAgents:
-    def __init__(self, agents: List[Agent], num_layers: int):
+    def __init__(self, agents: List[Agent], num_layers: int = 2):
         self.agents = agents
         self.num_layers = num_layers
-        self.claude_agent = ClaudeAgent()  # For aggregation
-
-    async def aggregate_responses(self, prompt: str, current_prompt: str, responses: List[str], layer_num: int) -> str:
-        aggregation_prompt = f"""
-        Original prompt: {prompt}
-
-        Current context:
-        {current_prompt}
-
-        Compile the best parts of the following responses into a comprehensive, coherent answer:
-        {responses[0]}
-
-        {responses[1]}
-
-        {responses[2]}
-
-        Your task:
-        1. Synthesize these responses, preserving the most valuable insights from each.
-        2. Ensure your answer is well-structured and formatted, borrowing the best layout ideas from the original responses.
-        3. Address all aspects of the original prompt comprehensively.
-        4. Maintain focus on answering the original prompt while incorporating the insights from these responses.
-        5. Your response should be more detailed and nuanced than previous layers. As this is layer {layer_num}, make sure to provide a {'more' if layer_num > 1 else ''} thorough and in-depth analysis.
-        6. Include any new perspectives or deeper insights that have emerged from the combination of previous responses.
-        7. If there are any conflicting viewpoints in the responses, address them and provide a balanced perspective.
-
-        Aim to produce a response that is {'even more comprehensive and insightful than the previous layer' if layer_num > 1 else 'comprehensive and insightful'}, building upon the accumulated knowledge and expanding the depth of the analysis."""
-        return await self.claude_agent.generate(aggregation_prompt, max_tokens=2000)
-
-    async def process_layer(self, original_prompt: str, current_prompt: str, layer_num: int) -> tuple:
-        print(f"Starting layer {layer_num} pass...")
-        
-        if layer_num == 1:
-            layer_prompt = original_prompt
-        else:
-            layer_prompt = f"""Original prompt: {original_prompt}
-
-    Additional context from previous layers:
-    {current_prompt}
-
-    In forming your response, please leverage and review the additional context provided above. Provide a new, more detailed response to the original question:
-
-    "{original_prompt}"
-
-    Utilize the given context and add any further thoughts, arguments, or insights that you feel would be beneficial to answering the original prompt comprehensively. Your response should be more detailed and nuanced than previous layers, incorporating the accumulated knowledge and insights."""
-
-        tasks = [agent.generate(layer_prompt) for agent in self.agents]
-        responses = await asyncio.gather(*tasks)
-        aggregated = await self.aggregate_responses(original_prompt, current_prompt, responses, layer_num)
-        print(f"Layer {layer_num} complete.")
-        print(f"Aggregate response for layer {layer_num}:")
-        print(colored(aggregated, 'magenta'))
-        print()
-        return layer_prompt, responses, aggregated
+        self.synthesis_agent = GeminiAgent()  # Gemini for layer synthesis
+        self.final_agent = ClaudeAgent()  # Claude for final output
 
     async def generate(self, prompt: str) -> tuple:
-        original_prompt = prompt
-        current_prompt = prompt
-        all_responses = []
-        all_aggregates = []
         all_layer_prompts = []
+        all_responses = []
+        all_syntheses = []
+        
+        current_context = ""
         for i in range(self.num_layers):
-            layer_prompt, responses, aggregated = await self.process_layer(original_prompt, current_prompt, i+1)
-            all_responses.append(responses)
-            all_aggregates.append(aggregated)
+            print(colored(f"\n* Layer {i+1} started", "cyan"))
+            layer_prompt = self.create_layer_prompt(prompt, current_context, i)
             all_layer_prompts.append(layer_prompt)
-            current_prompt = aggregated
+
+            initial_responses = await self.get_initial_responses(layer_prompt)
+            print(colored(f"* Layer {i+1} initial responses received", "green"))
+            
+            aggregations = await self.get_aggregations(prompt, layer_prompt, initial_responses)
+            print(colored(f"* Layer {i+1} aggregations completed", "green"))
+            
+            all_responses.append(initial_responses + aggregations)
+
+            synthesis, devils_advocate = await self.synthesize_responses(prompt, layer_prompt, aggregations)
+            all_syntheses.append((synthesis, devils_advocate))
+            current_context = f"Synthesis: {synthesis}\n\nDevil's Advocate: {devils_advocate}"
+            print(colored(f"* Layer {i+1} synthesis and devil's advocate perspective generated", "green"))
+            print(colored(f"* Layer {i+1} completed", "cyan"))
+
+        print(colored("\n* Generating Final Output", "yellow"))
+        final_response = await self.generate_final_output(prompt, all_syntheses)
+        print(colored("* Final Output Generated", "yellow"))
         
-        print("All layers complete. Generating final response...")
-        final_compilation_prompt = f"""Original prompt: {original_prompt}
-
-    Final context: {current_prompt}
-
-    Compile a comprehensive, coherent final answer that directly addresses the original prompt. 
-    Ensure that the final response is detailed, well-structured, and incorporates the most valuable insights from all previous layers.
-    Use appropriate headings and subheadings to organize the information effectively.
-    Maintain a clear and logical flow throughout the response."""
-
-        final_response = await self.claude_agent.generate(final_compilation_prompt, max_tokens=4000)
-        
-        # Calculate utilization percentages
         utilization = self.calculate_utilization(all_responses, final_response)
         
-        return all_layer_prompts, all_responses, all_aggregates, final_response, utilization
+        return all_layer_prompts, all_responses, all_syntheses, final_response, utilization
+
+    def create_layer_prompt(self, original_prompt: str, context: str, layer: int) -> str:
+        if layer == 0:
+            return original_prompt
+        else:
+            return f"""Original prompt: {original_prompt}
+
+    Context from previous layer:
+    {context}
+
+    Your task:
+    1. Independently solve or answer the original prompt using your own logic and reasoning.
+    2. Consider the provided context, but do not be overly influenced by it.
+    3. If the context causes you to rethink your instinctive response, explain why and provide your rationale.
+    4. Provide a clear, well-reasoned answer to the original prompt."""
+
+    async def get_initial_responses(self, prompt: str) -> List[str]:
+        responses = []
+        for index, agent in enumerate(self.agents, 1):
+            response = await agent.generate(prompt)
+            responses.append(response)
+            print(colored(f"* Agent {index} initial response received", "green"))
+        return responses
+
+    async def get_aggregations(self, original_prompt: str, current_prompt: str, responses: List[str]) -> List[str]:
+        aggregations = []
+        for i, agent in enumerate(self.agents):
+            aggregation_prompt = f"""Original prompt: {original_prompt}
+
+        Current context: {current_prompt}
+
+        Responses from agents:
+        {chr(10).join(responses)}
+
+        Your tasks:
+        1. Critically analyze and test the logic and reasoning of all responses, including your own.
+        2. Identify and challenge ALL assumptions made in the responses, even seemingly obvious ones.
+        3. If applicable, perform mathematical verifications to check the validity of the answers.
+        4. Explore multiple interpretations of the prompt using a logic tree, considering all possible scenarios.
+        5. Conduct a peer review by critically examining and potentially correcting the reasoning of other agents.
+        6. Provide your own independent answer to the original prompt, using the responses as context but relying primarily on your own reasoning.
+        7. Explain your thought process, including why you agree or disagree with other responses.
+        8. If you're unsure about any aspect, state so and explain why.
+
+        Ensure your response is structured, addressing each of these points separately."""
+
+            aggregation = await agent.generate(aggregation_prompt)
+            aggregations.append(aggregation)
+            print(colored(f"* Agent {i+1} aggregation completed", "green"))
+        return aggregations
+
+    async def synthesize_responses(self, original_prompt: str, current_prompt: str, responses: List[str]) -> tuple:
+        print(colored("* Starting synthesis and devil's advocate generation", "magenta"))
+        synthesis_prompt = f"""Original prompt: {original_prompt}
+
+        Current context: {current_prompt}
+
+        Aggregated responses:
+        {chr(10).join(responses)}
+
+        Your tasks:
+        1. Assess which of the aggregated responses is the most well-reasoned and logically sound.
+        2. Provide a summary of the key points and any disagreements among the responses.
+        3. Create a synthesis that will serve as context for the next layer, encouraging further independent analysis.
+        4. Include the original prompt in your synthesis.
+        5. Highlight areas that may need further consideration or clarification.
+
+        After completing the above tasks, take on an aggressive devil's advocate role:
+        6. Challenge the prevailing or most popular answer among the responses.
+        7. Critically examine and question basic counting, logic, and assumptions made by all agents.
+        8. Identify potential flaws, overlooked aspects, or alternative interpretations that could invalidate the current reasoning.
+        9. Propose at least one alternative perspective or solution that hasn't been considered.
+        10. If applicable, point out any mathematical or logical inconsistencies in the reasoning.
+
+        Provide your response in two clearly labeled sections: 'Synthesis' and 'Devil's Advocate'."""
+
+        combined_response = await self.synthesis_agent.generate(synthesis_prompt)
+        
+        # Split the combined response into synthesis and devil's advocate parts
+        parts = combined_response.split("Devil's Advocate:", 1)
+        synthesis = parts[0].replace("Synthesis:", "").strip()
+        
+        if len(parts) > 1:
+            devils_advocate = parts[1].strip()
+        else:
+            devils_advocate = "No specific Devil's Advocate perspective was provided. Consider potential alternative viewpoints or challenges to the synthesis."
+        
+        print(colored("* Synthesis and devil's advocate generation completed", "magenta"))
+        return synthesis, devils_advocate
+
+    async def generate_final_output(self, original_prompt: str, all_syntheses: List[tuple]) -> str:
+        consolidated_syntheses = "\n\n".join([
+            f"Layer {i+1} Synthesis:\n{synthesis}\n\nLayer {i+1} Devil's Advocate:\n{devils_advocate}"
+            for i, (synthesis, devils_advocate) in enumerate(all_syntheses)
+        ])
+        
+        final_prompt = f"""Original prompt: {original_prompt}
+
+        Consolidated syntheses from all layers:
+        {consolidated_syntheses}
+
+        Your tasks:
+        1. Carefully consider the original prompt and all synthesis responses from each layer.
+        2. Perform a thorough cross-check of all previous reasoning against the original prompt.
+        3. Identify any discrepancies or logical inconsistencies between the syntheses and the original prompt.
+        4. Resolve any conflicts or ambiguities, explaining your reasoning clearly.
+        5. Provide a final, definitive answer to the original prompt using your own logic and reasoning.
+        6. Use the syntheses as context, but do not be overly influenced by them if they contain errors.
+        7. If you disagree with the conclusions in the syntheses, explain why and provide your own rationale.
+        8. If you're unsure, state so and provide multiple possible answers with explanations.
+        9. Aim for a comprehensive, well-reasoned response that addresses all aspects of the original prompt.
+        10. Ensure your final answer is consistent with the original prompt and mathematically/logically sound.
+
+        Structure your response clearly, addressing each of these points separately."""
+
+        final_response = await self.final_agent.generate(final_prompt)
+        return final_response
 
     def calculate_utilization(self, all_responses: List[List[str]], final_response: str) -> Dict[str, float]:
-        utilization = {}
-        for i, agent in enumerate(self.agents):
-            agent_responses = [layer[i] for layer in all_responses]
+        utilization = {agent.name: 0 for agent in self.agents}
+        total_similarity = 0
+
+        for agent_index, agent in enumerate(self.agents):
+            agent_responses = []
+            for layer_responses in all_responses:
+                if agent_index < len(layer_responses):
+                    response_parts = layer_responses[agent_index].split(": ", 1)
+                    if len(response_parts) > 1:
+                        original_response = response_parts[1]
+                    else:
+                        original_response = response_parts[0]  # In case there's no prefix
+                    agent_responses.append(original_response)
+                else:
+                    agent_responses.append("")  # Add empty string if response is missing
+            
             combined_response = " ".join(agent_responses)
             similarity = SequenceMatcher(None, combined_response, final_response).ratio()
-            utilization[agent.name] = similarity * 100
-        total = sum(utilization.values())
-        return {k: v / total * 100 for k, v in utilization.items()}
-def generate_html_report(prompt: str, all_layer_prompts: List[str], all_responses: List[List[str]], all_aggregates: List[str], final_response: str, utilization: Dict[str, float], agents: List[Agent]) -> str:
-    html_content = f"""
-    <html>
-    <head>
-        <title>MoA Response Report</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; }}
-            h1, h2, h3 {{ color: #333; }}
-            .agent-response {{ margin-bottom: 20px; padding: 10px; border: 1px solid #ddd; }}
-            .agent-1 {{ background-color: #ffeeee; }}
-            .agent-2 {{ background-color: #eeffee; }}
-            .agent-3 {{ background-color: #eeeeff; }}
-            .final-response {{ background-color: #e6f3ff; padding: 15px; border: 2px solid #b3d9ff; }}
-            .layer {{ margin-bottom: 30px; padding: 15px; border: 1px solid #999; }}
-            .layer-prompt {{ background-color: #f0f0f0; padding: 10px; margin-bottom: 10px; }}
-            .layer-aggregate {{ background-color: #fff0f5; padding: 10px; margin-top: 10px; }}
-        </style>
-    </head>
-    <body>
-        <h1>MoA Response Report</h1>
-        <h2>Original Prompt:</h2>
-        <p>{html.escape(prompt)}</p>
+            utilization[agent.name] = similarity
+            total_similarity += similarity
 
-        <h2>Agent Utilization:</h2>
-        <ul>
-    """
-    for agent, percentage in utilization.items():
-        html_content += f"<li>{agent}: {percentage:.2f}%</li>"
-    
-    html_content += f"""
-        </ul>
+        if total_similarity == 0:
+            # If total similarity is zero, assign equal utilization to all agents
+            equal_share = 1.0 / len(self.agents)
+            return {agent.name: equal_share * 100 for agent in self.agents}
+        else:
+            # Convert similarities to percentages
+            return {agent_name: (similarity / total_similarity) * 100 for agent_name, similarity in utilization.items()}
 
-        <h2>Final MoA Response:</h2>
-        <div class="final-response">
-            <p>{html.escape(final_response)}</p>
-        </div>
-        
-        <h2>Intermediate Outputs:</h2>
-    """
-    
-    for layer, (layer_prompt, responses, aggregate) in enumerate(zip(all_layer_prompts, all_responses, all_aggregates), 1):
-        html_content += f'<div class="layer"><h3>Layer {layer}:</h3>'
-        html_content += f'<div class="layer-prompt"><h4>Layer Prompt:</h4><p>{html.escape(layer_prompt)}</p></div>'
-        for i, response in enumerate(responses):
-            if i == 2:  # Gemini is always Agent 3
-                agent_display = "Gemini (gemini-1.5-pro) - Agent 3"
-            else:
-                agent = agents[i]
-                agent_display = f"{agent.name} ({agent.model}) - {agent.role}"
-            html_content += f"""
-            <div class="agent-response agent-{i+1}">
-                <h4>{html.escape(agent_display)}:</h4>
-                <p>{html.escape(response)}</p>
-            </div>
-            """
-        html_content += f'<div class="layer-aggregate"><h4>Layer {layer} Aggregate:</h4><p>{html.escape(aggregate)}</p></div>'
-        html_content += '</div>'
-
-    html_content += """
-    </body>
-    </html>
-    """
-    
-    return html_content
-
-def generate_final_response_html(prompt: str, final_response: str, utilization: Dict[str, float]) -> str:
-    html_content = f"""
-    <html>
-    <head>
-        <title>MoA Final Response</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; }}
-            h1, h2 {{ color: #333; }}
-            .section {{ margin-bottom: 20px; padding: 10px; border: 1px solid #ddd; }}
-            .utilization {{ background-color: #f0f0f0; }}
-            .final-response {{ background-color: #e6f3ff; }}
-        </style>
-    </head>
-    <body>
-        <h1>MoA Final Response</h1>
-        
-        <div class="section">
-            <h2>Original Prompt:</h2>
-            <p>{html.escape(prompt)}</p>
-        </div>
-
-        <div class="section utilization">
-            <h2>Agent Utilization:</h2>
-            <ul>
-    """
-    for agent, percentage in utilization.items():
-        html_content += f"<li>{agent}: {percentage:.2f}%</li>"
-    
-    html_content += f"""
-            </ul>
-        </div>
-
-        <div class="section final-response">
-            <h2>Final MoA Response:</h2>
-            <p>{html.escape(final_response)}</p>
-        </div>
-    </body>
-    </html>
-    """
-    return html_content
-
-def generate_markdown_report(prompt: str, all_layer_prompts: List[str], all_responses: List[List[str]], all_aggregates: List[str], final_response: str, utilization: Dict[str, float], agents: List[Agent]) -> str:
+def generate_markdown_report(prompt: str, all_layer_prompts: List[str], all_responses: List[List[str]], all_syntheses: List[tuple], final_response: str, utilization: Dict[str, float], agents: List[Agent], synthesis_agent: Agent, final_agent: Agent) -> str:
     markdown_content = f"""# MoA Response Report
 
-## Original Prompt:
-{prompt}
+## Original Prompt
+> {prompt}
 
-## Agent Utilization:
-"""
-    for agent, percentage in utilization.items():
-        markdown_content += f"- {agent}: {percentage:.2f}%\n"
+## Agent Utilization
+{chr(10).join([f"- {agent_name}: {percentage:.2f}%" for agent_name, percentage in utilization.items()])}
 
-    markdown_content += f"""
-## Final MoA Response:
+## Final MoA Response
+**Final Response Agent: {final_agent.name}**
+
 {final_response}
 
-## Intermediate Outputs:
-"""
-    
-    for layer, (layer_prompt, responses, aggregate) in enumerate(zip(all_layer_prompts, all_responses, all_aggregates), 1):
-        markdown_content += f"### Layer {layer}:\n\n"
-        markdown_content += f"#### Layer Prompt:\n{layer_prompt}\n\n"
-        for i, response in enumerate(responses):
-            if i == 2:  # Gemini is always Agent 3
-                agent_display = "Gemini (gemini-1.5-pro) - Agent 3"
-            else:
-                agent = agents[i]
-                agent_display = f"{agent.name} ({agent.model}) - {agent.role}"
-            markdown_content += f"#### {agent_display}:\n{response}\n\n"
-        markdown_content += f"#### Layer {layer} Aggregate:\n{aggregate}\n\n"
+---
 
-    return markdown_content
+## Intermediate Outputs
+"""
+
+    for layer, (layer_prompt, responses, (synthesis, devils_advocate)) in enumerate(zip(all_layer_prompts, all_responses, all_syntheses), 1):
+        markdown_content += f"""
+### Layer {layer}
+
+<details>
+<summary>Layer {layer} Details (Click to expand)</summary>
+
+#### Layer Prompt
+> {"As per original prompt" if layer == 1 else "Provided original user prompt + synthesis from previous layer"}
+
+#### Step 1 - Agents Initial Responses
+"""
+        initial_responses = responses[:len(agents)] if layer == 1 else responses
+        for i, (agent, response) in enumerate(zip(agents, initial_responses)):
+            markdown_content += f"""
+##### {agent.name} (Agent {i+1})
+{response}
+"""
+
+        if layer == 1:
+            markdown_content += """
+#### Step 2 - Agent Aggregation of All Responses
+"""
+            aggregations = responses[len(agents):]
+            for i, (agent, response) in enumerate(zip(agents, aggregations)):
+                markdown_content += f"""
+##### {agent.name} (Agent {i+1})
+{response}
+"""
+
+        markdown_content += f"""
+#### Step 3 - Synthesized Aggregated Responses (Synthesis Agent: {synthesis_agent.name})
+
+##### Synthesis
+{synthesis}
+
+##### Devil's Advocate
+{devils_advocate}
+
+</details>
+
+---
+"""
+
+    markdown_content += f"""
+## Information Passed to Final Response Agent
+
+The following synthesized information from all layers, along with the original user prompt, was passed to the final response agent ({final_agent.name}). The final agent will use this information to generate the final MoA response.
+
+"""
+    for layer, (synthesis, devils_advocate) in enumerate(all_syntheses, 1):
+        markdown_content += f"""
+### Layer {layer} Synthesis
+
+{synthesis}
+
+### Layer {layer} Devil's Advocate
+
+{devils_advocate}
+
+---
+"""
+
+    return markdown_content.strip()
 
 def generate_final_response_markdown(prompt: str, final_response: str, utilization: Dict[str, float]) -> str:
     markdown_content = f"""# MoA Final Response
@@ -311,33 +367,68 @@ def generate_final_response_markdown(prompt: str, final_response: str, utilizati
     return markdown_content
 
 def sanitize_filename(filename):
-    return re.sub(r'[^\w\-_\. ]', '_', filename)
+    # Remove invalid filename characters and replace spaces with underscores
+    sanitized = re.sub(r'[^\w\-_\. ]', '', filename)
+    sanitized = re.sub(r'\s+', '_', sanitized)
+    # Ensure the filename is not empty and doesn't start with a dot
+    if not sanitized or sanitized.startswith('.'):
+        sanitized = 'untitled_' + sanitized
+    return sanitized[:50]  # Limit filename length
 
 async def interactive_session(moa: MixtureOfAgents):
-    print("Welcome to the Mixture of Agents (MoA) interactive session!")
-    print(f"The current setup uses {moa.num_layers} layers.")
-    print("The recommended default is three layers.")
+    welcome_message = """
+    Welcome to the Mixture of Agents (MoA) interactive session!
+
+    Mixture of Agents is an innovative approach to leveraging multiple Large Language Models (LLMs) to enhance reasoning and language generation capabilities. This implementation is based on the paper "Mixture-of-Agents Enhances Large Language Model Capabilities" by Wang et al. (2024). You can find the paper at: https://arxiv.org/pdf/2406.04692
+
+    In this session, we use the following models:
+    1. GPT-4o
+    2. Claude 3.5
+    3. Gemini Pro 1.5
+
+    How Mixture of Agents works:
+    1. Each layer involves all three agents responding to the prompt or previous layer's output.
+    2. After initial responses, each agent reviews and aggregates all responses, including their own.
+    3. A single agent then synthesizes the aggregated responses for each layer.
+    4. This process repeats for the specified number of layers.
+    5. Finally, a last agent generates the final output based on all layer syntheses.
+
+    Additional roles:
+    - Synthesis Agent: Gemini Pro 1.5 is responsible for synthesizing the aggregated responses at the end of each layer.
+    - Final Response Agent: Claude 3.5 is responsible for generating the final, comprehensive output.
+
+    """
+    print(welcome_message)
+
+    print("The default is suggested as 2 layers. It is not recommended to use more than 3 layers.")
     
-    layers_input = input("Would you like to start with three layers, or a different amount? (Enter Y/Yes for 3 layers, or a number): ").strip().lower()
+    layers_input = input("How many layers would you like to use? (Enter a number, or press Enter for default): ").strip()
     
-    if layers_input in ['y', 'yes']:
-        moa.num_layers = 3
+    if not layers_input:
+        moa.num_layers = 2
     else:
         try:
             num_layers = int(layers_input)
             if num_layers < 1:
-                print("Invalid input. Using the default of 3 layers.")
+                print("Invalid input. Using the default of 2 layers.")
+                moa.num_layers = 2
+            elif num_layers > 3:
+                print("More than 3 layers is not recommended. Using 3 layers.")
                 moa.num_layers = 3
             else:
                 moa.num_layers = num_layers
         except ValueError:
-            print("Invalid input. Using the default of 3 layers.")
-            moa.num_layers = 3
+            print("Invalid input. Using the default of 2 layers.")
+            moa.num_layers = 2
     
     print(f"\nUsing {moa.num_layers} layers for this session.")
     print("Type your questions or prompts, and the MoA model will respond.")
     print("To exit, type 'quit', 'exit', or 'q'.")
-    
+
+    # Create a 'reports' folder if it doesn't exist
+    reports_folder = Path("reports")
+    reports_folder.mkdir(exist_ok=True)
+
     while True:
         user_input = input("\nEnter your prompt: ")
         if user_input.lower() in ['quit', 'exit', 'q']:
@@ -355,51 +446,42 @@ async def interactive_session(moa: MixtureOfAgents):
         for agent, percentage in utilization.items():
             print(f"{agent}: {percentage:.2f}%")
         
-        # New saving process
-        save_final = input("\nDo you want to save the final response? (Y/N): ").strip().lower()
-        if save_final in ['y', 'yes']:
-            format_pref = input("Do you want to save as HTML, MD, or both? (html/md/both): ").strip().lower()
-            
+        # Saving process
+        save_output = input("\nDo you want to save the outputs? (Y/N): ").strip().lower()
+        if save_output in ['y', 'yes']:
             base_filename = sanitize_filename(user_input[:50])
-        
-            if format_pref in ['html', 'both']:
-                html_filename = f"{base_filename}_final_response.html"
-                html_content = generate_final_response_html(user_input, final_response, utilization)
-                with open(html_filename, "w", encoding="utf-8") as f:
-                    f.write(html_content)
-                print(f"Final response saved as '{html_filename}'")
-        
-            if format_pref in ['md', 'both']:
-                md_filename = f"{base_filename}_final_response.md"
-                md_content = generate_final_response_markdown(user_input, final_response, utilization)
+            
+            md_filename = reports_folder / f"{base_filename}_final_response.md"
+            md_content = generate_final_response_markdown(user_input, final_response, utilization)
+            try:
                 with open(md_filename, "w", encoding="utf-8") as f:
                     f.write(md_content)
                 print(f"Final response saved as '{md_filename}'")
-        
-        save_log = input("Do you also want a full log of the agent responses at each layer? (Y/N): ").strip().lower()
-        if save_log in ['y', 'yes']:
-            if format_pref == 'both':
-                log_format = 'both'
-            else:
-                log_format = input("Do you want to save the log as HTML, MD, or both? (html/md/both): ").strip().lower()
+            except Exception as e:
+                print(f"Error saving Markdown file: {str(e)}")
             
-            if log_format in ['html', 'both']:
-                html_log_filename = f"{base_filename}_detailed_log.html"
-                html_content = generate_html_report(user_input, all_layer_prompts, all_responses, all_aggregates, final_response, utilization, moa.agents)
-                with open(html_log_filename, "w", encoding="utf-8") as f:
-                    f.write(html_content)
-                print(f"Detailed HTML log saved as '{html_log_filename}'")
-            
-            if log_format in ['md', 'both']:
-                md_log_filename = f"{base_filename}_detailed_log.md"
-                md_content = generate_markdown_report(user_input, all_layer_prompts, all_responses, all_aggregates, final_response, utilization, moa.agents)
-                with open(md_log_filename, "w", encoding="utf-8") as f:
-                    f.write(md_content)
-                print(f"Detailed Markdown log saved as '{md_log_filename}'")
-    else:
-        print("No files saved.")
-
-
+            save_full_log = input("Do you want to save full logs of the agent responses at each layer? (Y/N): ").strip().lower()
+            if save_full_log in ['y', 'yes']:
+                md_log_filename = reports_folder / f"{base_filename}_detailed_log.md"
+                md_content = generate_markdown_report(
+                    user_input,
+                    all_layer_prompts,
+                    all_responses,
+                    all_aggregates,
+                    final_response,
+                    utilization,
+                    moa.agents,
+                    moa.synthesis_agent,
+                    moa.final_agent
+                )
+                try:
+                    with open(md_log_filename, "w", encoding="utf-8") as f:
+                        f.write(md_content)
+                    print(f"Detailed Markdown log saved as '{md_log_filename}'")
+                except Exception as e:
+                    print(f"Error saving detailed Markdown log: {str(e)}")
+        else:
+            print("No files saved.")
 async def main():
     # Initialize agents
     gpt4_agent = GPT4Agent()
